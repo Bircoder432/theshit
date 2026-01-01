@@ -1,3 +1,4 @@
+mod output;
 mod python;
 mod rust;
 mod structs;
@@ -8,13 +9,12 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, read};
 use crossterm::style::Stylize;
 use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
 use std::{fs, io};
 use structs::RawModeGuard;
 
 pub fn fix_command(command: String, expand_command: String) -> io::Result<String> {
-    let command_output = match get_command_output(expand_command) {
+    let command_output = match output::get_command_output(expand_command) {
         Ok(output) => output,
         Err(e) => match e.kind() {
             ErrorKind::NotFound => CommandOutput::new(
@@ -99,17 +99,6 @@ pub fn fix_command(command: String, expand_command: String) -> io::Result<String
         }
     }
     Ok(choose_fixed_command(fixed_commands))
-}
-
-fn get_command_output(expand_command: String) -> io::Result<CommandOutput> {
-    let split_command = shell_words::split(&expand_command)
-        .map_err(|e| io::Error::other(format!("Failed to parse command: {e}")))?;
-    let output = Command::new(&split_command[0])
-        .args(&split_command[1..])
-        .env("LANG", "C") // Set locale to C to avoid issues with rules that depend on locale
-        .env("LC_ALL", "C")
-        .output()?;
-    Ok(CommandOutput::from(output))
 }
 
 fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
