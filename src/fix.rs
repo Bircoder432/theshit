@@ -10,7 +10,9 @@ use crossterm::style::Stylize;
 use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::{fs, io};
+use std::sync::mpsc;
+use std::time::Duration;
+use std::{fs, io, thread};
 use structs::RawModeGuard;
 
 pub fn fix_command(command: String, expand_command: String) -> io::Result<String> {
@@ -40,14 +42,22 @@ pub fn fix_command(command: String, expand_command: String) -> io::Result<String
     for rule in fs::read_dir(active_rules_dir)? {
         let rule = rule?;
         let path = rule.path();
-        if path
-            .file_name()
-            .unwrap_or_else(|| panic!("Can't get get file name for {}", path.display()))
-            .to_string_lossy()
-            == "__pycache__"
-        {
+
+        let file_name = match path.file_name() {
+            Some(name) => name,
+            None => {
+                eprintln!(
+                    "{}: {}",
+                    "Skipping rule without filename".yellow(),
+                    path.display()
+                );
+                continue;
+            }
+        };
+        if file_name.to_string_lossy() == "__pycache__" {
             continue;
         }
+
         match path.extension() {
             Some(extension) => match extension.to_string_lossy().as_ref() {
                 "native" => {
@@ -101,6 +111,33 @@ pub fn fix_command(command: String, expand_command: String) -> io::Result<String
     Ok(choose_fixed_command(fixed_commands))
 }
 
+fn get_command_timeout(command_name: &str) -> Duration {
+    // Get the base command name without path
+    let base_command = command_name.split('/').next_back().unwrap_or(command_name);
+
+    match base_command {
+        // Slow commands that may take longer
+        "gradle" | "gradlew" => Duration::from_secs(10),
+        "mvn" | "maven" => Duration::from_secs(10),
+        "npm" | "yarn" | "pnpm" => Duration::from_secs(10),
+        "cargo" => Duration::from_secs(10),
+        "docker" | "podman" => Duration::from_secs(10),
+        "kubectl" | "helm" => Duration::from_secs(10),
+        "terraform" | "tf" => Duration::from_secs(10),
+        "ansible" | "ansible-playbook" => Duration::from_secs(10),
+
+        // Medium-speed commands
+        "git" => Duration::from_secs(5),
+        "make" => Duration::from_secs(5),
+        "pip" | "pip3" => Duration::from_secs(5),
+        "composer" => Duration::from_secs(5),
+        "bundle" => Duration::from_secs(5),
+
+        // Fast commands - default timeout
+        _ => Duration::from_secs(1),
+    }
+}
+
 fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
     if fixed_commands.is_empty() {
         eprintln!(
@@ -111,13 +148,16 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
         std::process::exit(1);
     }
 
-    let mut current_command = fixed_commands.first().unwrap();
+    let mut current_command = fixed_commands
+        .first()
+        .expect("fixed_commands is not empty; checked above");
     let mut current_index = 0;
 
     eprintln!();
     let _raw_mode_guard = RawModeGuard::new();
     let mut err = io::stderr();
-    err.write_all(
+
+    if let Err(e) = err.write_all(
         format!(
             "{} [{}/{}/{}/{}]",
             current_command,
@@ -127,8 +167,10 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
             "Ctrl+C".red()
         )
         .as_bytes(),
-    )
-    .expect("Failed to write to stderr");
+    ) {
+        eprintln!("Warning: failed to write to stderr: {}", e);
+    }
+
     loop {
         match read() {
             Ok(event) => {
@@ -144,8 +186,10 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                                 } else {
                                     current_index = fixed_commands.len() - 1;
                                 }
-                                current_command = fixed_commands.get(current_index).unwrap();
-                                err.write_all(
+                                current_command = fixed_commands
+                                    .get(current_index)
+                                    .expect("current_index is within bounds");
+                                if let Err(e) = err.write_all(
                                     format!(
                                         "{} [{}/{}/{}/{}]",
                                         current_command,
@@ -155,8 +199,9 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                                         "Ctrl+C".red()
                                     )
                                     .as_bytes(),
-                                )
-                                .expect("Failed to write to stderr");
+                                ) {
+                                    eprintln!("Warning: failed to write to stderr: {}", e);
+                                }
                             }
                         }
                         (KeyCode::Down, _) => {
@@ -166,8 +211,10 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                                 } else {
                                     current_index = 0;
                                 }
-                                current_command = fixed_commands.get(current_index).unwrap();
-                                err.write_all(
+                                current_command = fixed_commands
+                                    .get(current_index)
+                                    .expect("current_index is within bounds");
+                                if let Err(e) = err.write_all(
                                     format!(
                                         "{} [{}/{}/{}/{}]",
                                         current_command,
@@ -177,8 +224,9 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                                         "Ctrl+C".red()
                                     )
                                     .as_bytes(),
-                                )
-                                .expect("Failed to write to stderr");
+                                ) {
+                                    eprintln!("Warning: failed to write to stderr: {}", e);
+                                }
                             }
                         }
                         (KeyCode::Enter, _) => {
@@ -203,5 +251,56 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                 std::process::exit(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_command_timeout_fast_commands() {
+        assert_eq!(get_command_timeout("ls"), Duration::from_secs(1));
+        assert_eq!(get_command_timeout("echo"), Duration::from_secs(1));
+        assert_eq!(get_command_timeout("cat"), Duration::from_secs(1));
+        assert_eq!(get_command_timeout("/bin/ls"), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_get_command_timeout_slow_commands() {
+        assert_eq!(get_command_timeout("gradle"), Duration::from_secs(10));
+        assert_eq!(get_command_timeout("gradlew"), Duration::from_secs(10));
+        assert_eq!(get_command_timeout("mvn"), Duration::from_secs(10));
+        assert_eq!(get_command_timeout("npm"), Duration::from_secs(10));
+        assert_eq!(get_command_timeout("cargo"), Duration::from_secs(10));
+        assert_eq!(get_command_timeout("docker"), Duration::from_secs(10));
+        assert_eq!(
+            get_command_timeout("/usr/local/bin/gradle"),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn test_get_command_timeout_medium_commands() {
+        assert_eq!(get_command_timeout("git"), Duration::from_secs(5));
+        assert_eq!(get_command_timeout("make"), Duration::from_secs(5));
+        assert_eq!(get_command_timeout("pip"), Duration::from_secs(5));
+        assert_eq!(get_command_timeout("/usr/bin/git"), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_get_command_output_empty_command() {
+        let result = get_command_output("".to_string());
+        assert!(result.is_err());
+        let err = result.err().expect("Expected error but got success");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn test_get_command_output_nonexistent_command() {
+        let result = get_command_output("nonexistent_command_12345".to_string());
+        assert!(result.is_err());
+        let err = result.err().expect("Expected error but got success");
+        assert!(matches!(err.kind(), ErrorKind::NotFound));
     }
 }
