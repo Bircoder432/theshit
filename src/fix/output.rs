@@ -1,21 +1,18 @@
+use crate::error::{AppError, AppResult};
 use crate::fix::structs::CommandOutput;
+use crate::misc::split_command;
 use crossterm::style::Stylize;
 use libc::{geteuid, getuid, gid_t, uid_t};
-use pyo3::impl_::callback::HashCallbackOutput;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
-pub fn get_command_output(expand_command: String) -> io::Result<CommandOutput> {
-    let split_command = shell_words::split(&expand_command)
-        .map_err(|e| io::Error::other(format!("Failed to parse command: {e}")))?;
+pub fn get_command_output(expand_command: String) -> AppResult<CommandOutput> {
+    let split_command = split_command(&expand_command);
 
     if split_command.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Command is empty",
-        ));
+        return Err(AppError::Other("Command is empty".to_string()));
     }
 
     let timeout = get_command_timeout(&split_command[0]);
@@ -27,12 +24,7 @@ pub fn get_command_output(expand_command: String) -> io::Result<CommandOutput> {
         .env("LC_ALL", "C");
 
     let permission_issue = PermissionIssue::detect();
-    permission_issue.fix(&mut command).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("Failed to fix permissions: {}", e),
-        )
-    })?;
+    permission_issue.fix(&mut command)?;
 
     let (sender, receiver) = std::sync::mpsc::channel();
 
@@ -43,11 +35,8 @@ pub fn get_command_output(expand_command: String) -> io::Result<CommandOutput> {
 
     match receiver.recv_timeout(timeout) {
         Ok(Ok(output)) => Ok(CommandOutput::from(output)),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "Command execution timed out",
-        )),
+        Ok(Err(e)) => Err(AppError::Io(e)),
+        Err(_) => Err(AppError::Other("Command execution timed out".to_string())),
     }
 }
 
@@ -72,7 +61,7 @@ impl PermissionIssue {
         PermissionIssue::Normal
     }
 
-    fn fix(self, command: &mut Command) -> Result<(), String> {
+    fn fix(self, command: &mut Command) -> AppResult<()> {
         let current_euid = unsafe { geteuid() };
         let current_uid = unsafe { getuid() };
         let current_egid = unsafe { libc::getegid() };
@@ -87,43 +76,43 @@ impl PermissionIssue {
             PermissionIssue::EuidNotEqualRuid => (current_uid, current_gid),
             PermissionIssue::SudoEnvironment => {
                 let uid = std::env::var("SUDO_UID").map_err(|e| {
-                    format!(
+                    AppError::Security(format!(
                         "{} Detected sudo environment, but cannot get SUDO_UID: {}",
                         "SECURITY ERROR:".red().bold(),
                         e
-                    )
+                    ))
                 })?;
                 let gid = std::env::var("SUDO_GID").map_err(|e| {
-                    format!(
+                    AppError::Security(format!(
                         "{} Detected sudo environment, but cannot get SUDO_GID: {}",
                         "SECURITY ERROR:".red().bold(),
                         e
-                    )
+                    ))
                 })?;
                 (
                     uid.parse::<uid_t>().map_err(|e| {
-                        format!(
+                        AppError::Security(format!(
                             "{} Invalid SUDO_UID value: {}",
                             "SECURITY ERROR:".red().bold(),
                             e
-                        )
+                        ))
                     })?,
                     gid.parse::<gid_t>().map_err(|e| {
-                        format!(
+                        AppError::Security(format!(
                             "{} Invalid SUDO_GID value: {}",
                             "SECURITY ERROR:".red().bold(),
                             e
-                        )
+                        ))
                     })?,
                 )
             }
             PermissionIssue::DoasEnvironment => {
                 let doas_user = std::env::var("DOAS_USER").map_err(|e| {
-                    format!(
+                    AppError::Security(format!(
                         "{} Detected doas environment, but cannot get DOAS_USER: {}",
                         "SECURITY ERROR:".red().bold(),
                         e
-                    )
+                    ))
                 })?;
                 get_ids_by_username(doas_user)?
             }
@@ -137,10 +126,10 @@ impl PermissionIssue {
         let user_context = get_user_context_by_uid(target.0)?;
 
         if change_supplementary_groups && current_euid != 0 {
-            return Err(format!(
+            return Err(AppError::Security(format!(
                 "{} Cannot change supplementary groups when not running as root.",
                 "SECURITY ERROR:".red().bold()
-            ));
+            )));
         }
 
         command.env("USER", &user_context.username);
@@ -173,21 +162,21 @@ impl PermissionIssue {
         Ok(())
     }
 }
-fn get_ids_by_username(username: String) -> Result<(uid_t, gid_t), String> {
+fn get_ids_by_username(username: String) -> AppResult<(uid_t, gid_t)> {
     let user_cstr = std::ffi::CString::new(username.clone()).map_err(|e| {
-        format!(
+        AppError::Security(format!(
             "{} Username contains null bytes: {}",
             "SECURITY ERROR:".red().bold(),
             e
-        )
+        ))
     })?;
     let passwd = unsafe { libc::getpwnam(user_cstr.as_ptr()) };
     if passwd.is_null() {
-        return Err(format!(
+        return Err(AppError::Security(format!(
             "{} Cannot find user info for '{}'",
             "SECURITY ERROR:".red().bold(),
             username
-        ));
+        )));
     }
     unsafe { Ok(((*passwd).pw_uid, (*passwd).pw_gid)) }
 }
@@ -197,14 +186,14 @@ struct UserContext {
     home_dir: String,
 }
 
-fn get_user_context_by_uid(uid: uid_t) -> Result<UserContext, String> {
+fn get_user_context_by_uid(uid: uid_t) -> AppResult<UserContext> {
     let passwd = unsafe { libc::getpwuid(uid) };
     if passwd.is_null() {
-        return Err(format!(
+        return Err(AppError::Security(format!(
             "{} Cannot find user info for UID '{}'",
             "SECURITY ERROR:".red().bold(),
             uid
-        ));
+        )));
     }
     unsafe {
         let username = std::ffi::CStr::from_ptr((*passwd).pw_name)
@@ -248,6 +237,7 @@ fn get_command_timeout(command_name: &str) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::__private::kind::TraitKind;
     use std::io::ErrorKind;
 
     #[test]
@@ -285,7 +275,7 @@ mod tests {
         let result = get_command_output("".to_string());
         assert!(result.is_err());
         let err = result.err().expect("Expected error but got success");
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("Command is empty"));
     }
 
     #[test]
@@ -293,6 +283,6 @@ mod tests {
         let result = get_command_output("nonexistent_command_12345".to_string());
         assert!(result.is_err());
         let err = result.err().expect("Expected error but got success");
-        assert!(matches!(err.kind(), ErrorKind::NotFound));
+        assert!(err.to_string().contains("No such file or directory"));
     }
 }

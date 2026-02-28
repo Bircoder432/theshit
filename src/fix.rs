@@ -3,8 +3,10 @@ mod python;
 mod rust;
 mod structs;
 
+use crate::error::AppError;
 use crate::fix::rust::NativeRule;
 use crate::fix::structs::CommandOutput;
+use anyhow::__private::kind::TraitKind;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, read};
 use crossterm::style::Stylize;
 use std::io::{ErrorKind, Write};
@@ -16,18 +18,38 @@ use structs::RawModeGuard;
 pub fn fix_command(command: String, expand_command: String) -> io::Result<String> {
     let command_output = match output::get_command_output(expand_command) {
         Ok(output) => output,
-        Err(e) => match e.kind() {
-            ErrorKind::NotFound => CommandOutput::new(
-                "command not found".to_string(),
-                "command not found".to_string(),
-            ),
-            ErrorKind::PermissionDenied => CommandOutput::new(
-                "permission denied".to_string(),
-                "permission denied".to_string(),
-            ),
+        // Err(e) => match e.kind() {
+        //     ErrorKind::NotFound => CommandOutput::new(
+        //         "command not found".to_string(),
+        //         "command not found".to_string(),
+        //     ),
+        //     ErrorKind::PermissionDenied => CommandOutput::new(
+        //         "permission denied".to_string(),
+        //         "permission denied".to_string(),
+        //     ),
+        //     _ => {
+        //         eprintln!("{}: {}", "Error executing command".red(), e);
+        //         return Err(e);
+        //     }
+        // },
+        Err(e) => match e {
+            AppError::Io(e) => match e.kind() {
+                ErrorKind::NotFound => CommandOutput::new(
+                    "command not found".to_string(),
+                    "command not found".to_string(),
+                ),
+                ErrorKind::PermissionDenied => CommandOutput::new(
+                    "permission denied".to_string(),
+                    "permission denied".to_string(),
+                ),
+                _ => {
+                    eprintln!("{}: {}", "Error executing command".red(), e);
+                    return Err(e);
+                }
+            },
             _ => {
                 eprintln!("{}: {}", "Error executing command".red(), e);
-                return Err(e);
+                return Err(io::Error::new(ErrorKind::Other, "Error executing command"));
             }
         },
     };
