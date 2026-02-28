@@ -6,7 +6,6 @@ mod structs;
 use crate::error::AppError;
 use crate::fix::rust::NativeRule;
 use crate::fix::structs::CommandOutput;
-use anyhow::__private::kind::TraitKind;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, read};
 use crossterm::style::Stylize;
 use std::io::{ErrorKind, Write};
@@ -49,7 +48,7 @@ pub fn fix_command(command: String, expand_command: String) -> io::Result<String
             },
             _ => {
                 eprintln!("{}: {}", "Error executing command".red(), e);
-                return Err(io::Error::new(ErrorKind::Other, "Error executing command"));
+                return Err(io::Error::other("Error executing command"));
             }
         },
     };

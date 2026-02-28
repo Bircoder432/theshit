@@ -66,11 +66,10 @@ impl PermissionIssue {
         let current_uid = unsafe { getuid() };
         let current_egid = unsafe { libc::getegid() };
         let current_gid = unsafe { libc::getgid() };
-        let change_supplementary_groups = match self {
-            PermissionIssue::DoasEnvironment => true,
-            PermissionIssue::SudoEnvironment => true,
-            _ => false,
-        };
+        let change_supplementary_groups = matches!(
+            self,
+            PermissionIssue::SudoEnvironment | PermissionIssue::DoasEnvironment
+        );
 
         let target = match self {
             PermissionIssue::EuidNotEqualRuid => (current_uid, current_gid),
@@ -145,10 +144,11 @@ impl PermissionIssue {
 
         unsafe {
             command.pre_exec(move || {
-                if current_euid == 0 && change_supplementary_groups {
-                    if libc::initgroups(username_cstring.as_ptr(), target.1) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
+                if current_euid == 0
+                    && change_supplementary_groups
+                    && libc::initgroups(username_cstring.as_ptr(), target.1) != 0
+                {
+                    return Err(io::Error::last_os_error());
                 }
                 if libc::setgid(target.1) != 0 {
                     return Err(io::Error::last_os_error());
