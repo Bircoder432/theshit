@@ -1,35 +1,54 @@
+mod output;
 mod python;
 mod rust;
 mod structs;
 
+use crate::error::AppError;
 use crate::fix::rust::NativeRule;
 use crate::fix::structs::CommandOutput;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, read};
 use crossterm::style::Stylize;
 use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
-use std::process::Command;
 use std::str::FromStr;
-use std::sync::mpsc;
-use std::time::Duration;
-use std::{fs, io, thread};
+use std::{fs, io};
 use structs::RawModeGuard;
 
 pub fn fix_command(command: String, expand_command: String) -> io::Result<String> {
-    let command_output = match get_command_output(expand_command) {
+    let command_output = match output::get_command_output(expand_command) {
         Ok(output) => output,
-        Err(e) => match e.kind() {
-            ErrorKind::NotFound => CommandOutput::new(
-                "command not found".to_string(),
-                "command not found".to_string(),
-            ),
-            ErrorKind::PermissionDenied => CommandOutput::new(
-                "permission denied".to_string(),
-                "permission denied".to_string(),
-            ),
+        // Err(e) => match e.kind() {
+        //     ErrorKind::NotFound => CommandOutput::new(
+        //         "command not found".to_string(),
+        //         "command not found".to_string(),
+        //     ),
+        //     ErrorKind::PermissionDenied => CommandOutput::new(
+        //         "permission denied".to_string(),
+        //         "permission denied".to_string(),
+        //     ),
+        //     _ => {
+        //         eprintln!("{}: {}", "Error executing command".red(), e);
+        //         return Err(e);
+        //     }
+        // },
+        Err(e) => match e {
+            AppError::Io(e) => match e.kind() {
+                ErrorKind::NotFound => CommandOutput::new(
+                    "command not found".to_string(),
+                    "command not found".to_string(),
+                ),
+                ErrorKind::PermissionDenied => CommandOutput::new(
+                    "permission denied".to_string(),
+                    "permission denied".to_string(),
+                ),
+                _ => {
+                    eprintln!("{}: {}", "Error executing command".red(), e);
+                    return Err(e);
+                }
+            },
             _ => {
                 eprintln!("{}: {}", "Error executing command".red(), e);
-                return Err(e);
+                return Err(io::Error::other("Error executing command"));
             }
         },
     };
@@ -109,72 +128,6 @@ pub fn fix_command(command: String, expand_command: String) -> io::Result<String
         }
     }
     Ok(choose_fixed_command(fixed_commands))
-}
-
-fn get_command_timeout(command_name: &str) -> Duration {
-    // Get the base command name without path
-    let base_command = command_name.split('/').next_back().unwrap_or(command_name);
-
-    match base_command {
-        // Slow commands that may take longer
-        "gradle" | "gradlew" => Duration::from_secs(10),
-        "mvn" | "maven" => Duration::from_secs(10),
-        "npm" | "yarn" | "pnpm" => Duration::from_secs(10),
-        "cargo" => Duration::from_secs(10),
-        "docker" | "podman" => Duration::from_secs(10),
-        "kubectl" | "helm" => Duration::from_secs(10),
-        "terraform" | "tf" => Duration::from_secs(10),
-        "ansible" | "ansible-playbook" => Duration::from_secs(10),
-
-        // Medium-speed commands
-        "git" => Duration::from_secs(5),
-        "make" => Duration::from_secs(5),
-        "pip" | "pip3" => Duration::from_secs(5),
-        "composer" => Duration::from_secs(5),
-        "bundle" => Duration::from_secs(5),
-
-        // Fast commands - default timeout
-        _ => Duration::from_secs(1),
-    }
-}
-
-fn get_command_output(expand_command: String) -> io::Result<CommandOutput> {
-    let split_command = shell_words::split(&expand_command)
-        .map_err(|e| io::Error::other(format!("Failed to parse command: {e}")))?;
-
-    if split_command.is_empty() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "Empty command provided",
-        ));
-    }
-
-    let timeout = get_command_timeout(&split_command[0]);
-
-    let child = Command::new(&split_command[0])
-        .args(&split_command[1..])
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .spawn()?;
-
-    let (sender, receiver) = mpsc::channel();
-
-    let _handle = thread::spawn(move || {
-        let result = child.wait_with_output();
-        let _ = sender.send(result);
-    });
-
-    match receiver.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(CommandOutput::from(output)),
-        Ok(Err(e)) => Err(e),
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(io::Error::new(
-            ErrorKind::TimedOut,
-            format!("Command timed out after {:?}", timeout),
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(io::Error::other("Command thread disconnected unexpectedly"))
-        }
-    }
 }
 
 fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
@@ -290,56 +243,5 @@ fn choose_fixed_command(mut fixed_commands: Vec<String>) -> String {
                 std::process::exit(1);
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_get_command_timeout_fast_commands() {
-        assert_eq!(get_command_timeout("ls"), Duration::from_secs(1));
-        assert_eq!(get_command_timeout("echo"), Duration::from_secs(1));
-        assert_eq!(get_command_timeout("cat"), Duration::from_secs(1));
-        assert_eq!(get_command_timeout("/bin/ls"), Duration::from_secs(1));
-    }
-
-    #[test]
-    fn test_get_command_timeout_slow_commands() {
-        assert_eq!(get_command_timeout("gradle"), Duration::from_secs(10));
-        assert_eq!(get_command_timeout("gradlew"), Duration::from_secs(10));
-        assert_eq!(get_command_timeout("mvn"), Duration::from_secs(10));
-        assert_eq!(get_command_timeout("npm"), Duration::from_secs(10));
-        assert_eq!(get_command_timeout("cargo"), Duration::from_secs(10));
-        assert_eq!(get_command_timeout("docker"), Duration::from_secs(10));
-        assert_eq!(
-            get_command_timeout("/usr/local/bin/gradle"),
-            Duration::from_secs(10)
-        );
-    }
-
-    #[test]
-    fn test_get_command_timeout_medium_commands() {
-        assert_eq!(get_command_timeout("git"), Duration::from_secs(5));
-        assert_eq!(get_command_timeout("make"), Duration::from_secs(5));
-        assert_eq!(get_command_timeout("pip"), Duration::from_secs(5));
-        assert_eq!(get_command_timeout("/usr/bin/git"), Duration::from_secs(5));
-    }
-
-    #[test]
-    fn test_get_command_output_empty_command() {
-        let result = get_command_output("".to_string());
-        assert!(result.is_err());
-        let err = result.err().expect("Expected error but got success");
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
-    }
-
-    #[test]
-    fn test_get_command_output_nonexistent_command() {
-        let result = get_command_output("nonexistent_command_12345".to_string());
-        assert!(result.is_err());
-        let err = result.err().expect("Expected error but got success");
-        assert!(matches!(err.kind(), ErrorKind::NotFound));
     }
 }
